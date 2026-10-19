@@ -1,0 +1,13 @@
+{
+  "name": "form-miniapp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "FORM — Telegram Mini App: питание, тренировки, прогресс. Разработка Александра Гурлени.",
+  "type": "module",
+  "scripts": {
+    "start": "bun server.ts",
+    "reminders": "bun reminders.ts"
+  },
+  "engines": { "bun": ">=1.1" },
+  "packageManager": "bun@1.2.21"
+}

@@ -80,6 +80,10 @@ async function clientsReport() {
       `🏋️ неделя ${m.trWeek ?? "—"}${fresh && m.trToday ? " · сегодня ✓" : ""}`,
       fresh && m.checkin ? "✅ чек-ин" : "",
       m.planB ? `🅑 План Б: ${esc(m.planB)}` : "",
+      m.lvl ? `⭐ ур. ${m.lvl}` : "",
+      fresh && m.steps ? `👣 ${m.steps}` : "",
+      fresh && m.diaryK ? `📒 +${m.diaryK} ккал` : "",
+      m.sep ? "раздельное" : "",
     ].filter(Boolean);
     return `${quiet ? "⚠️ " : ""}<b>${who(r)}</b> · ${ago(r.updated_at)}\n${parts.join(" · ")}`;
   });

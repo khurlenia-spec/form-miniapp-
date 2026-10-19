@@ -146,7 +146,11 @@ async function onUpdate(up: any) {
 
 // Настройка бота при старте
 if (TOKEN && APP_URL) {
-  await tgApi("setWebhook", { url: `${APP_URL}tg/${HOOK}`, secret_token: HOOK, allowed_updates: ["message"], drop_pending_updates: false });
+  const wh = await tgApi("setWebhook", { url: `${APP_URL}tg/${HOOK}`, secret_token: HOOK, allowed_updates: ["message"], drop_pending_updates: false });
+  console.log("setWebhook:", JSON.stringify(wh));
+  const me = await tgApi("getMe", {});
+  console.log("bot:", me && me.ok ? "@" + me.result.username : JSON.stringify(me));
+  setTimeout(async () => { const info = await tgApi("getWebhookInfo", {}); console.log("webhookInfo:", JSON.stringify(info && info.result)); }, 20000);
   await tgApi("setChatMenuButton", { menu_button: { type: "web_app", text: "FORM", web_app: { url: APP_URL } } });
   await tgApi("setMyCommands", { commands: [
     { command: "start", description: "Открыть FORM" },
@@ -173,7 +177,8 @@ Bun.serve({
 
       if (HOOK && path === `/tg/${HOOK}` && req.method === "POST") {
         if (req.headers.get("x-telegram-bot-api-secret-token") !== HOOK) return new Response("forbidden", { status: 403 });
-        const up = await req.json();
+        const up: any = await req.json();
+        console.log("update", up.update_id, up.message?.from?.id, (up.message?.text || "").slice(0, 20));
         onUpdate(up).catch((e) => console.error("update", e));
         return json({ ok: true });
       }

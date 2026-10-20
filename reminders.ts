@@ -56,6 +56,19 @@ for (const u of users as any[]) {
         }
       }
     }
+    // 1b) вода — если отстаёт от графика (10/12/14/16/18), но не одновременно с едой
+    let mealNow = Array.isArray(m.slots) && m.slots.some((sl: any) => sl && sl.t && inWindow(sl.t));
+    for (const wt of ["10:00", "12:00", "14:00", "16:00", "18:00"]) {
+      if (!inWindow(wt) || mealNow || quietDays >= 3) continue;
+      const h = Number(wt.slice(0, 2));
+      const expected = Math.max(1, Math.min(8, Math.floor((h * 60 - 480) / 90) + 1));
+      const water = m.date === today ? Number(m.water || 0) : 0;
+      if (water >= expected - 1) continue;
+      if (await once(id, `water:${today}:${wt}`)) {
+        const text = `💧 ${hero} ${fem ? "хочет" : "хочет"} пить! Сегодня выпито ${water} из 8 стаканов.\n\nВыпей стакан воды и отметь его в FORM.`;
+        if (await send(id, text, "Отметить стакан")) sent++;
+      }
+    }
     // 2) вечерний чек-ин в 20:00
     if (inWindow("20:00") && quietDays < 3 && !(m.date === today && m.checkin)) {
       if (await once(id, `checkin:${today}`)) {

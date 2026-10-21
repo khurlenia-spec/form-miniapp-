@@ -9,6 +9,9 @@ const APP_URL = DOMAIN ? `https://${DOMAIN}/` : "";
 const COACH_CODE = (Bun.env.COACH_CODE || "").trim();
 const HOOK = TOKEN ? createHash("sha256").update(TOKEN).digest("hex").slice(0, 32) : "";
 const HTML = await Bun.file(new URL("./public/index.html", import.meta.url)).text();
+// barcode scanner library, loaded by the page only when the scanner is opened
+let ZXING: string | null = null;
+try { ZXING = await Bun.file(new URL("./public/zxing.js", import.meta.url)).text(); } catch { ZXING = null; }
 
 await sql`CREATE TABLE IF NOT EXISTS users (
   tg_id BIGINT PRIMARY KEY, first_name TEXT, username TEXT,
@@ -176,6 +179,9 @@ Bun.serve({
     try {
       if (req.method === "GET" && (path === "/" || path === "/index.html")) {
         return new Response(HTML, { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache" } });
+      }
+      if (req.method === "GET" && path === "/zxing.js" && ZXING) {
+        return new Response(ZXING, { headers: { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "public, max-age=604800" } });
       }
       if (path === "/health") return json({ ok: true, bot: !!TOKEN });
 

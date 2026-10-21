@@ -216,7 +216,9 @@ Bun.serve({
         }
       }
       return new Response("Not found", { status: 404 });
-    } catch (e) {
+    } catch (e: any) {
+      // the client closed the app while a request was still being sent — nothing to fix on our side
+      if (e && (e.name === "AbortError" || /connection was closed/i.test(String(e.message)))) return new Response(null, { status: 499 });
       console.error(e);
       return json({ error: "server" }, 500);
     }

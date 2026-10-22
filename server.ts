@@ -67,6 +67,8 @@ async function lookupCode(code: string) {
     // no nutrition in Open Food Facts: get the name (from OFF or barcode-list) and estimate by the closest generic product
     let nm = found && found.n ? found.n : null;
     if (!nm) { const b = await blName(code); if (b) nm = prettyName(b); }
+    if (!nm) { const u = await upcName(code); if (u) nm = prettyName(u); }
+    if (!nm) { const o = await opfName(code); if (o) nm = prettyName(o); }
     console.log("food", code, found ? "off-no-kbju" : offline ? "off-offline" : "off-miss", nm ? "name:" + nm : "no-name");
     if (nm) {
       await sql`INSERT INTO foods (code, name, per, q, src) VALUES (${code}, ${nm}, ${null}, ${found?.q || null}, 'name')
@@ -87,7 +89,13 @@ const BL_BASE = (Bun.env.BL_BASE || "https://barcode-list.ru").replace(/\/$/, ""
 let GENERIC: any[] = [];
 try { GENERIC = (await Bun.file(new URL("./foods.json", import.meta.url)).json()).foods || []; } catch { GENERIC = []; }
 const STOP = new Set(["с", "и", "в", "на", "из", "без", "для", "по", "со", "от", "вкус", "вкусом", "шт", "гр", "уп", "асс", "ассорти", "те", "тм"]);
-const SYN: Record<string, string> = { "горький": "темный", "горького": "темный", "черный": "темный", "биойогурт": "биойогурт", "йогурт.": "йогурт", "пит": "питьевой", "пит.": "питьевой", "слив": "сливочное", "слив.": "сливочное", "раст": "растительное", "подсолн": "подсолнечное", "мол": "молоко", "зерненый": "зерненый", "ядрица": "гречка", "геркулес": "овсяные", "pasta": "макароны", "milk": "молоко" };
+const SYN: Record<string, string> = { "горький": "темный", "горького": "темный", "черный": "темный", "биойогурт": "биойогурт", "йогурт.": "йогурт", "пит": "питьевой", "пит.": "питьевой", "слив": "сливочное", "слив.": "сливочное", "раст": "растительное", "подсолн": "подсолнечное", "мол": "молоко", "зерненый": "зерненый", "ядрица": "гречка", "геркулес": "овсяные", "pasta": "макароны", "milk": "молоко",
+  "yogurt": "йогурт", "yoghurt": "йогурт", "cheese": "сыр", "chocolate": "шоколад", "dark": "темный", "cola": "кола", "coke": "кола", "juice": "сок", "orange": "апельсиновый", "apple": "яблоко",
+  "water": "вода", "bread": "хлеб", "rice": "рис", "beer": "пиво", "coffee": "кофе", "tea": "чай", "cookies": "печенье", "cookie": "печенье", "biscuits": "печенье", "chips": "чипсы", "crisps": "чипсы",
+  "butter": "масло", "sugar": "сахар", "honey": "мед", "peanut": "арахисовая", "protein": "протеин", "whey": "сывороточный", "bar": "батончик", "cereal": "хлопья", "oats": "овсяные", "oatmeal": "овсяные",
+  "tuna": "тунец", "chicken": "курица", "ketchup": "кетчуп", "mayonnaise": "майонез", "spaghetti": "спагетти", "noodles": "лапша", "candy": "конфеты", "wafer": "вафли", "wafers": "вафли", "cream": "сливки",
+  "energy": "энергетик", "soda": "газировка", "lemonade": "лимонад", "nuts": "орехи", "almonds": "миндаль", "cashew": "кешью", "sausage": "колбаса", "ham": "ветчина", "salmon": "лосось", "eggs": "яйцо", "egg": "яйцо",
+  "snickers": "сникерс", "nutella": "nutella", "spread": "паста", "hazelnut": "ореховая", "activia": "биойогурт", "strawberry": "клубничный", "cherry": "фруктовый", "peach": "фруктовый", "banana": "банан", "vanilla": "ванильный" };
 const words = (t: string) => String(t || "").toLowerCase().replace(/ё/g, "е").replace(/[^a-zа-я0-9%.,]+/g, " ").split(" ").filter((w) => w && !STOP.has(w)).map((w) => SYN[w] || w);
 const stem = (w: string) => (w.length >= 6 ? w.slice(0, 5) : w.length >= 4 ? w.slice(0, 4) : w);
 function pctOf(t: string): number | null {
@@ -99,7 +107,7 @@ function pctOf(t: string): number | null {
 function matchGeneric(name: string) {
   const pw = words(name).map((w) => w.replace(/[.,%]+$/g, "")).filter((w) => /[a-zа-я]/.test(w) && w.length >= 3);
   if (!pw.length) return null;
-  const pp = pctOf(name);
+  const pp = pctOf(name); const latin = /[a-z]{3}/i.test(name) && !/[а-я]{3}/i.test(name);
   // how well a generic word matches the product's words: same word 1, same stem 0.8, abbreviation ("пит." = питьевой) 0.6
   const sim = (w: string) => { let b = 0; for (const x of pw) { if (x === w) return 1; if (stem(x) === stem(w)) b = Math.max(b, 0.8); else if (x.length >= 3 && w.startsWith(x)) b = Math.max(b, 0.6); } return b; };
   let best: any = null, bestScore = 0;
@@ -111,6 +119,8 @@ function matchGeneric(name: string) {
     let score = tot / fw.length + tot * 0.05;
     // the product type is usually the first word of the name ("Йогурт питьевой персик")
     if (stem(fw[0]) === stem(pw[0]) || pw[0] === fw[0]) score += 0.5;
+    // foreign names put the product type anywhere ("Gold Standard Whey Protein")
+    else if (latin && s0 >= 0.8) score += 0.4;
     const fp = pctOf(f[0]);
     if (pp != null && fp != null) score -= Math.min(0.35, Math.abs(pp - fp) / 15);
     else if (pp != null || fp != null) score -= 0.08;
@@ -135,6 +145,18 @@ async function blName(code: string) {
   const html = await getText(blUrl(code)); if (!html) return null;
   const rows = blRows(html).filter((x) => x.code === code && x.n.length > 2).sort((a, b) => b.r - a.r);
   return rows.length ? rows[0].n : null;
+}
+// third source: UPCitemdb (international goods, free trial endpoint, names only)
+const UPC_BASE = (Bun.env.UPC_BASE || "https://api.upcitemdb.com").replace(/\/$/, "");
+async function upcName(code: string) {
+  const j: any = await getJSON(`${UPC_BASE}/prod/trial/lookup?upc=${code}`, 6000);
+  const it = j && Array.isArray(j.items) ? j.items[0] : null;
+  return it && it.title ? String(it.title).slice(0, 120) : null;
+}
+// fourth source: Open Products Facts (same family as Open Food Facts, sometimes has the name)
+async function opfName(code: string) {
+  const j: any = await getJSON(`${OFF_BASE.replace("openfoodfacts", "openproductsfacts")}/api/v2/product/${code}.json?fields=product_name,brands`, 5000);
+  return j && j.status === 1 && j.product && j.product.product_name ? String(j.product.product_name) + (j.product.brands ? " · " + String(j.product.brands).split(",")[0] : "") : null;
 }
 const prettyName = (n: string) => { const t = n.replace(/\s+/g, " ").trim(); return t === t.toUpperCase() ? t.charAt(0) + t.slice(1).toLowerCase() : t; };
 function estimate(name: string) { const g = matchGeneric(name); return g ? { per: g.per, est: g.base } : null; }
@@ -340,7 +362,8 @@ Bun.serve({
       if (path === "/health/sources") {
         const t0 = Date.now(); const off: any = await getJSON(`${OFF_BASE}/api/v2/product/3017620422003.json?fields=product_name`);
         const t1 = Date.now(); const bl = await blName("4602358009870");
-        return json({ off: off ? (off.status === 1 ? "ok" : "status " + (off._status || off.status)) : "unreachable", offMs: t1 - t0, barcodeList: bl ? "ok: " + bl : "unreachable", blMs: Date.now() - t1, generic: GENERIC.length });
+        const up = await upcName("0049000028911");
+        return json({ upcitemdb: up ? "ok: " + up : "unreachable", off: off ? (off.status === 1 ? "ok" : "status " + (off._status || off.status)) : "unreachable", offMs: t1 - t0, barcodeList: bl ? "ok: " + bl : "unreachable", blMs: Date.now() - t1, generic: GENERIC.length });
       }
 
       if (HOOK && path === `/tg/${HOOK}` && req.method === "POST") {

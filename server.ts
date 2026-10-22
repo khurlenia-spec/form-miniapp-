@@ -18,6 +18,72 @@ await sql`CREATE TABLE IF NOT EXISTS users (
   state JSONB, meta JSONB, notify BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`;
 await sql`CREATE TABLE IF NOT EXISTS settings (k TEXT PRIMARY KEY, v TEXT)`;
+// shared product base: products found in Open Food Facts and products users entered themselves
+await sql`CREATE TABLE IF NOT EXISTS foods (
+  code TEXT PRIMARY KEY, name TEXT, per JSONB, q TEXT, src TEXT, by_id BIGINT,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`;
+
+// ---------- products: barcode lookup and search ----------
+const OFF_BASE = (Bun.env.OFF_BASE || "https://world.openfoodfacts.org").replace(/\/$/, "");
+const SAL_BASE = (Bun.env.SAL_BASE || "https://search.openfoodfacts.org").replace(/\/$/, "");
+const OFF_UA = "FORM-miniapp/1.0 (Telegram Mini App; nutrition diary)";
+const OFF_FIELDS = "code,product_name,product_name_ru,product_name_en,generic_name,brands,nutriments,quantity";
+const r1 = (v: any) => (v == null || v === "" || !isFinite(+v) ? null : Math.round(+v * 10) / 10);
+function offProduct(pr: any) {
+  if (!pr) return null;
+  const nu = pr.nutriments || {};
+  const kc = nu["energy-kcal_100g"] != null ? +nu["energy-kcal_100g"] : nu.energy_100g != null ? +nu.energy_100g / 4.184 : null;
+  const name = String(pr.product_name_ru || pr.product_name || pr.product_name_en || pr.generic_name || "").trim();
+  const brand = pr.brands ? String(pr.brands).split(",")[0].trim() : "";
+  const per = [kc, nu.proteins_100g, nu.fat_100g, nu.carbohydrates_100g].map(r1);
+  // fill in calories from macros when only macros are given
+  if (per[0] == null && per[1] != null && per[2] != null && per[3] != null) per[0] = Math.round(per[1]! * 4 + per[2]! * 9 + per[3]! * 4);
+  return { code: String(pr.code || ""), n: (name || "") + (brand && !name.toLowerCase().includes(brand.toLowerCase()) ? " · " + brand : ""), per, q: pr.quantity || "" };
+}
+const okPer = (per: any) => Array.isArray(per) && per.length === 4 && per.every((v: any) => v != null && isFinite(+v) && +v >= 0) && +per[0] <= 950 && +per[1] <= 100 && +per[2] <= 100 && +per[3] <= 100;
+async function getJSON(u: string, ms = 7000) {
+  const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), ms);
+  try { const r = await fetch(u, { headers: { "User-Agent": OFF_UA, Accept: "application/json" }, signal: ctl.signal }); if (!r.ok) return { _status: r.status }; return await r.json(); }
+  catch { return null; } finally { clearTimeout(t); }
+}
+async function lookupCode(code: string) {
+  const row = (await sql`SELECT name, per, q, src, updated_at FROM foods WHERE code = ${code}`)[0];
+  let per = row?.per; if (typeof per === "string") { try { per = JSON.parse(per); } catch { per = null; } }
+  // remembered products (also "not found" for 2 days, so we don't hammer the service)
+  if (row && (okPer(per) || Date.now() - new Date(row.updated_at).getTime() < 2 * 86400000)) return okPer(per) ? { n: row.name, per, q: row.q || "", src: row.src } : row.name ? { n: row.name, per: null, q: row.q || "" } : null;
+  const codes = [code]; if (code.length === 12) codes.push("0" + code); if (code.length === 13 && code[0] === "0") codes.push(code.slice(1));
+  let found: any = null, offline = false;
+  for (const c of codes) {
+    const j: any = await getJSON(`${OFF_BASE}/api/v2/product/${c}.json?fields=${OFF_FIELDS}`);
+    if (!j) { offline = true; continue; }
+    if (j.status === 1 && j.product) { found = offProduct({ ...j.product, code: c }); break; }
+  }
+  if (offline && !found) return { offline: true };
+  const good = found && okPer(found.per);
+  await sql`INSERT INTO foods (code, name, per, q, src) VALUES (${code}, ${found?.n || null}, ${good ? JSON.stringify(found.per) : null}::text::jsonb, ${found?.q || null}, ${good ? "off" : "none"})
+    ON CONFLICT (code) DO UPDATE SET name = COALESCE(EXCLUDED.name, foods.name), per = EXCLUDED.per, q = EXCLUDED.q, src = EXCLUDED.src, updated_at = now() WHERE foods.src <> 'user'`;
+  return found ? { n: found.n, per: good ? found.per : null, q: found.q, src: "off" } : null;
+}
+const searchCache = new Map<string, { t: number; items: any[] }>();
+async function searchFoods(q: string) {
+  const key = q.toLowerCase();
+  const hit = searchCache.get(key); if (hit && Date.now() - hit.t < 6 * 3600000) return hit.items;
+  const like = "%" + key.replace(/[%_]/g, "") + "%";
+  const mine = await sql`SELECT code, name, per, q FROM foods WHERE per IS NOT NULL AND lower(name) LIKE ${like} ORDER BY (src = 'user') DESC, updated_at DESC LIMIT 15`;
+  const items: any[] = mine.map((r: any) => ({ code: r.code, n: r.name, per: typeof r.per === "string" ? JSON.parse(r.per) : r.per, q: r.q || "" }));
+  const seen = new Set(items.map((x) => x.code));
+  const add = (arr: any[]) => { for (const pr of arr || []) { const p = offProduct(pr); if (p && p.n && okPer(p.per) && !seen.has(p.code)) { seen.add(p.code); items.push(p); } } };
+  const enc = encodeURIComponent(q);
+  const sal: any = await getJSON(`${SAL_BASE}/search?q=${enc}&page_size=40&langs=ru,en&fields=${OFF_FIELDS}`, 6000);
+  if (sal && Array.isArray(sal.hits)) add(sal.hits);
+  if (items.length < 8) {
+    const cgi: any = await getJSON(`${OFF_BASE}/cgi/search.pl?search_terms=${enc}&search_simple=1&action=process&json=1&page_size=40&fields=${OFF_FIELDS}`, 8000);
+    if (cgi && Array.isArray(cgi.products)) add(cgi.products);
+  }
+  const out = items.slice(0, 40);
+  if (out.length) { searchCache.set(key, { t: Date.now(), items: out }); if (searchCache.size > 500) searchCache.delete(searchCache.keys().next().value!); }
+  return out;
+}
 
 async function tgApi(method: string, body: Record<string, unknown>) {
   if (!TOKEN) return null;
@@ -210,6 +276,28 @@ Bun.serve({
           await upsertUser(user);
           await sql`UPDATE users SET state = ${st}::text::jsonb, meta = ${JSON.stringify(b.meta ?? null)}::text::jsonb, updated_at = now() WHERE tg_id = ${user.id}`;
           return json({ ok: true });
+        }
+        if (path === "/api/food" && req.method === "GET") {
+          const code = String(url.searchParams.get("code") || "").replace(/\D/g, "").slice(0, 14);
+          if (code.length < 6) return json({ error: "bad code" }, 400);
+          const p: any = await lookupCode(code);
+          if (p && p.offline) return json({ offline: true });
+          return json({ product: p });
+        }
+        if (path === "/api/food" && req.method === "POST") {
+          const b: any = await req.json();
+          const code = String(b.code || "").replace(/\D/g, "").slice(0, 14);
+          const n = String(b.n || "").trim().slice(0, 120);
+          const per = Array.isArray(b.per) ? b.per.map(r1) : null;
+          if (code.length < 6 || !n || !okPer(per) || +per[1] + +per[2] + +per[3] > 105) return json({ error: "bad product" }, 400);
+          await sql`INSERT INTO foods (code, name, per, q, src, by_id) VALUES (${code}, ${n}, ${JSON.stringify(per)}::text::jsonb, ${String(b.q || "").slice(0, 40)}, 'user', ${user.id})
+            ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name, per = EXCLUDED.per, q = EXCLUDED.q, src = 'user', by_id = EXCLUDED.by_id, updated_at = now() WHERE foods.src <> 'off'`;
+          return json({ ok: true });
+        }
+        if (path === "/api/food/search" && req.method === "GET") {
+          const q = String(url.searchParams.get("q") || "").trim().slice(0, 60);
+          if (q.length < 2) return json({ items: [] });
+          return json({ items: await searchFoods(q) });
         }
         if (path === "/api/message" && req.method === "POST") {
           const b: any = await req.json();

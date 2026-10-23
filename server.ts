@@ -414,6 +414,11 @@ Bun.serve({
           if (q.length < 2) return json({ items: [] });
           return json({ items: await searchFoods(q) });
         }
+        if (path === "/api/log" && req.method === "POST") {
+          const b: any = await req.json().catch(() => ({}));
+          console.error("client-error", user.id, String(b.msg || "").slice(0, 300), JSON.stringify(b.ctx || null).slice(0, 300), String(b.ua || "").slice(0, 160), String(b.stack || "").split("\n").slice(0, 4).join(" | ").slice(0, 600));
+          return json({ ok: true });
+        }
         if (path === "/api/message" && req.method === "POST") {
           const b: any = await req.json();
           const text = String(b.text || "").slice(0, 3000).trim();

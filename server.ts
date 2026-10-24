@@ -10,7 +10,15 @@ const COACH_CODE = (Bun.env.COACH_CODE || "").trim();
 // admins: Telegram user IDs that may open the admin panel (can be overridden with the ADMIN_IDS variable)
 const ADMIN_IDS = new Set((Bun.env.ADMIN_IDS || "7652898622,576948888").split(/[\s,]+/).filter(Boolean).map(String));
 const HOOK = TOKEN ? createHash("sha256").update(TOKEN).digest("hex").slice(0, 32) : "";
-const HTML = await Bun.file(new URL("./public/index.html", import.meta.url)).text();
+// 3D avatar: when AVATAR_GLB_URL is set (a prepared GLB model, see AVATAR_MODEL.md), the app renders it with Three.js;
+// without it the app keeps the built-in SVG hero. Files placed in public/avatar/ are served at /avatar/.
+// two characters: public/avatar/female.glb and public/avatar/male.glb are picked up automatically;
+// AVATAR_GLB_F / AVATAR_GLB_M (or AVATAR_GLB_URL for both) can point to models hosted elsewhere
+const avFile = async (n: string) => (await Bun.file(new URL("./public/avatar/" + n, import.meta.url)).exists()) ? "/avatar/" + n : "";
+const AV_F = (Bun.env.AVATAR_GLB_F || Bun.env.AVATAR_GLB_URL || "").trim() || await avFile("female.glb");
+const AV_M = (Bun.env.AVATAR_GLB_M || Bun.env.AVATAR_GLB_URL || "").trim() || await avFile("male.glb");
+const AVATAR_CFG: any = AV_F || AV_M ? { models: { ...(AV_F ? { f: AV_F } : {}), ...(AV_M ? { m: AV_M } : {}) } } : {};
+const HTML = (await Bun.file(new URL("./public/index.html", import.meta.url)).text()).replace("window.FORM_AVATAR={};", "window.FORM_AVATAR=" + JSON.stringify(AVATAR_CFG) + ";");
 // barcode scanner library, loaded by the page only when the scanner is opened
 let ZXING: string | null = null;
 try { ZXING = await Bun.file(new URL("./public/zxing.js", import.meta.url)).text(); } catch { ZXING = null; }
@@ -401,7 +409,12 @@ Bun.serve({
       if (req.method === "GET" && path === "/zxing.js" && ZXING) {
         return new Response(ZXING, { headers: { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "public, max-age=604800" } });
       }
-      if (path === "/health") return json({ ok: true, bot: !!TOKEN });
+      if (req.method === "GET" && path.startsWith("/avatar/") && /^\/avatar\/[\w.\-\/]+$/.test(path) && !path.includes("..")) {
+        const f = Bun.file(new URL("./public" + path, import.meta.url));
+        if (await f.exists()) return new Response(f, { headers: { "Cache-Control": "public, max-age=86400", ...(path.endsWith(".glb") ? { "Content-Type": "model/gltf-binary" } : {}) } });
+        return new Response("not found", { status: 404 });
+      }
+      if (path === "/health") return json({ ok: true, bot: !!TOKEN, avatar: AVATAR_CFG.models ? AVATAR_CFG.models : "svg" });
       if (path === "/health/sources") {
         const t0 = Date.now(); const off: any = await getJSON(`${OFF_BASE}/api/v2/product/3017620422003.json?fields=product_name`);
         const t1 = Date.now(); const bl = await blName("4602358009870");

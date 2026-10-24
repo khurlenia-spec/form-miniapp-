@@ -20,6 +20,9 @@ await sql`CREATE TABLE IF NOT EXISTS users (
   state JSONB, meta JSONB, notify BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`;
 await sql`CREATE TABLE IF NOT EXISTS settings (k TEXT PRIMARY KEY, v TEXT)`;
+// people removed by an admin: their data is deleted and the app and the bot stay closed for them until an admin restores access
+await sql`CREATE TABLE IF NOT EXISTS banned (tg_id BIGINT PRIMARY KEY, name TEXT, by_id BIGINT, at TIMESTAMPTZ NOT NULL DEFAULT now())`;
+const isBanned = async (id: any) => !ADMIN_IDS.has(String(id)) && (await sql`SELECT 1 FROM banned WHERE tg_id = ${id}`).length > 0;
 // shared product base: products found in Open Food Facts and products users entered themselves
 await sql`CREATE TABLE IF NOT EXISTS foods (
   code TEXT PRIMARY KEY, name TEXT, per JSONB, q TEXT, src TEXT, by_id BIGINT,
@@ -305,6 +308,10 @@ async function onUpdate(up: any) {
   if (!msg || !msg.chat || msg.chat.type !== "private") return;
   const text: string = msg.text || "";
   const from = msg.from;
+  if (from && (await isBanned(from.id))) {
+    if (text.startsWith("/start")) await tgApi("sendMessage", { chat_id: msg.chat.id, text: "Доступ к FORM закрыт администратором." });
+    return;
+  }
   const coach = await getCoach();
   const isCoach = coach === msg.chat.id;
 
@@ -409,6 +416,7 @@ Bun.serve({
       if (path.startsWith("/api/")) {
         const user = verify(req.headers.get("x-init-data") || "");
         if (!user) return json({ error: "unauthorized" }, 401);
+        if (await isBanned(user.id)) return json({ error: "banned" }, 403);
         if (path === "/api/state" && req.method === "GET") {
           await upsertUser(user);
           const r = await sql`SELECT state FROM users WHERE tg_id = ${user.id}`;
@@ -449,7 +457,26 @@ Bun.serve({
         if (path === "/api/admin/users" && req.method === "GET") {
           if (!ADMIN_IDS.has(String(user.id))) return json({ error: "forbidden" }, 403);
           console.log("admin", user.id, "opened users");
-          return json({ users: await adminUsers(), now: new Date().toISOString() });
+          const banned = await sql`SELECT tg_id, name, at FROM banned ORDER BY at DESC LIMIT 500`;
+          return json({ users: await adminUsers(), banned: banned.map((b: any) => ({ id: String(b.tg_id), name: b.name || "", at: b.at })), now: new Date().toISOString() });
+        }
+        if ((path === "/api/admin/delete" || path === "/api/admin/unban") && req.method === "POST") {
+          if (!ADMIN_IDS.has(String(user.id))) return json({ error: "forbidden" }, 403);
+          const b: any = await req.json().catch(() => ({}));
+          const id = String(b.id || "").replace(/\D/g, "");
+          if (!id) return json({ error: "bad id" }, 400);
+          if (path === "/api/admin/unban") {
+            await sql`DELETE FROM banned WHERE tg_id = ${id}`;
+            console.log("admin", user.id, "restored access for", id);
+            return json({ ok: true });
+          }
+          if (ADMIN_IDS.has(id)) return json({ error: "cannot delete admin" }, 400);
+          const u = (await sql`SELECT first_name, username FROM users WHERE tg_id = ${id}`)[0];
+          const name = u ? (u.first_name || "") + (u.username ? " @" + u.username : "") : String(b.name || "").slice(0, 80);
+          await sql`DELETE FROM users WHERE tg_id = ${id}`;
+          await sql`INSERT INTO banned (tg_id, name, by_id) VALUES (${id}, ${name}, ${user.id}) ON CONFLICT (tg_id) DO UPDATE SET name = EXCLUDED.name, by_id = EXCLUDED.by_id, at = now()`;
+          console.log("admin", user.id, "deleted user", id);
+          return json({ ok: true });
         }
         if (path === "/api/log" && req.method === "POST") {
           const b: any = await req.json().catch(() => ({}));

@@ -20,6 +20,10 @@ await sql`CREATE TABLE IF NOT EXISTS users (
   state JSONB, meta JSONB, notify BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`;
 await sql`CREATE TABLE IF NOT EXISTS settings (k TEXT PRIMARY KEY, v TEXT)`;
+// one-time safety copy of every user's data (profile, hero settings, progress) before the avatar system update;
+// created once, never overwritten, so the previous settings can always be restored
+await sql`CREATE TABLE IF NOT EXISTS users_backup_20261024 AS SELECT * FROM users`;
+console.log("backup users_backup_20261024 rows:", (await sql`SELECT count(*)::int AS n FROM users_backup_20261024`)[0].n);
 // people removed by an admin: their data is deleted and the app and the bot stay closed for them until an admin restores access
 await sql`CREATE TABLE IF NOT EXISTS banned (tg_id BIGINT PRIMARY KEY, name TEXT, by_id BIGINT, at TIMESTAMPTZ NOT NULL DEFAULT now())`;
 const isBanned = async (id: any) => !ADMIN_IDS.has(String(id)) && (await sql`SELECT 1 FROM banned WHERE tg_id = ${id}`).length > 0;

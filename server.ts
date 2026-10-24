@@ -7,6 +7,8 @@ const TOKEN = (Bun.env.BOT_TOKEN || "").trim();
 const DOMAIN = Bun.env.RAILWAY_PUBLIC_DOMAIN || "";
 const APP_URL = DOMAIN ? `https://${DOMAIN}/` : "";
 const COACH_CODE = (Bun.env.COACH_CODE || "").trim();
+// admins: Telegram user IDs that may open the admin panel (can be overridden with the ADMIN_IDS variable)
+const ADMIN_IDS = new Set((Bun.env.ADMIN_IDS || "7652898622,576948888").split(/[\s,]+/).filter(Boolean).map(String));
 const HOOK = TOKEN ? createHash("sha256").update(TOKEN).digest("hex").slice(0, 32) : "";
 const HTML = await Bun.file(new URL("./public/index.html", import.meta.url)).text();
 // barcode scanner library, loaded by the page only when the scanner is opened
@@ -268,6 +270,36 @@ async function clientsReport() {
   return `<b>Клиенты FORM</b> (${rows.length})\n⚠️ — нет активности 3+ дня, стоит уточнить, нужна ли помощь.\n\n${lines.join("\n\n")}`;
 }
 
+// ---------- admin panel: everyone's goal, weight and progress ----------
+const GOALS = ["Похудеть", "Набрать мышечную массу", "Рекомпозиция тела", "Поддерживать форму", "Наладить питание и привычки", "Опытный спортсмен", "Опытная спортсменка"];
+const numOr = (v: any) => { const x = parseFloat(String(v ?? "").replace(",", ".")); return isFinite(x) && x > 0 ? x : null; };
+async function adminUsers() {
+  const rows = await sql`SELECT tg_id, first_name, username, created_at, updated_at, meta,
+    state->'goal' AS goal, state->'athMode' AS ath, state->'sex' AS sex, state->'age' AS age, state->'h' AS h, state->'w' AS w, state->'tw' AS tw,
+    state->'weights' AS weights, state->'xp' AS xp, state->'screen' AS screen, state->'av'->'name' AS hero
+    FROM users ORDER BY updated_at DESC LIMIT 2000`;
+  const J = (v: any) => { if (typeof v === "string") { try { return JSON.parse(v); } catch { return v; } } return v; };
+  const today = new Date().toLocaleDateString("sv-SE", { timeZone: "Europe/Minsk" });
+  return rows.map((r: any) => {
+    const m = J(r.meta) || {}, g = J(r.goal), ws = J(r.weights) || {};
+    const hist = Object.keys(ws).filter((k) => numOr(ws[k])).sort().map((k) => [k, +numOr(ws[k])!.toFixed(1)]);
+    const w0 = numOr(J(r.w)), tw = numOr(J(r.tw)), wNow = hist.length ? hist[hist.length - 1][1] as number : w0;
+    let prog: number | null = null;
+    if (w0 && tw && wNow && Math.abs(w0 - tw) >= 0.5) prog = Math.max(0, Math.min(100, Math.round(((w0 - wNow) / (w0 - tw)) * 100)));
+    const gi = typeof g === "number" ? g : null;
+    return {
+      id: String(r.tg_id), name: r.first_name || "", user: r.username || "", hero: J(r.hero) || "",
+      created: r.created_at, active: r.updated_at, onb: J(r.screen) !== "app",
+      goal: gi != null ? (GOALS[gi] || m.goal || "—") + (gi >= 5 ? (J(r.ath) ? " · сушка" : " · масса") : "") : m.goal || null,
+      sex: J(r.sex) === 1 ? "ж" : "м", age: numOr(J(r.age)), h: numOr(J(r.h)),
+      w0, w: wNow, tw, dw: w0 && wNow ? +(wNow - w0).toFixed(1) : null, prog, hist: hist.slice(-30),
+      lvl: m.lvl || null, kcal: m.kcal || null, trWeek: m.trWeek ?? null,
+      today: m.date === today ? { meals: m.mealsDone ?? 0, total: m.mealsTotal ?? 0, ateK: m.ateK ?? m.diaryK ?? 0, steps: m.steps || 0, checkin: !!m.checkin, tr: !!m.trToday } : null,
+      planB: m.planB || null,
+    };
+  });
+}
+
 async function onUpdate(up: any) {
   const msg = up.message;
   if (!msg || !msg.chat || msg.chat.type !== "private") return;
@@ -413,6 +445,11 @@ Bun.serve({
           const q = String(url.searchParams.get("q") || "").trim().slice(0, 60);
           if (q.length < 2) return json({ items: [] });
           return json({ items: await searchFoods(q) });
+        }
+        if (path === "/api/admin/users" && req.method === "GET") {
+          if (!ADMIN_IDS.has(String(user.id))) return json({ error: "forbidden" }, 403);
+          console.log("admin", user.id, "opened users");
+          return json({ users: await adminUsers(), now: new Date().toISOString() });
         }
         if (path === "/api/log" && req.method === "POST") {
           const b: any = await req.json().catch(() => ({}));

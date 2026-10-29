@@ -175,8 +175,8 @@ async function searchFoods(q: string) {
   const key = q.toLowerCase();
   const hit = searchCache.get(key); if (hit && Date.now() - hit.t < 6 * 3600000) return hit.items;
   const like = "%" + key.replace(/[%_]/g, "") + "%";
-  const mine = await sql`SELECT code, name, per, q FROM foods WHERE per IS NOT NULL AND lower(name) LIKE ${like} ORDER BY (src = 'user') DESC, updated_at DESC LIMIT 15`;
-  const items: any[] = mine.map((r: any) => ({ code: r.code, n: r.name, per: typeof r.per === "string" ? JSON.parse(r.per) : r.per, q: r.q || "" }));
+  const mine = await sql`SELECT code, name, per, q, src FROM foods WHERE per IS NOT NULL AND lower(name) LIKE ${like} ORDER BY (src = 'user') DESC, updated_at DESC LIMIT 20`;
+  const items: any[] = mine.map((r: any) => ({ code: String(r.code).startsWith("u") ? "" : r.code, n: r.name, per: typeof r.per === "string" ? JSON.parse(r.per) : r.per, q: r.q || (r.src === "user" ? "добавили пользователи FORM" : "") }));
   const seen = new Set(items.map((x) => x.code));
   const add = (arr: any[]) => { for (const pr of arr || []) { const p = offProduct(pr); if (p && p.n && okPer(p.per) && !seen.has(p.code)) { seen.add(p.code); items.push(p); } } };
   const enc = encodeURIComponent(q);
@@ -451,6 +451,21 @@ Bun.serve({
           if (code.length < 6 || !n || !okPer(per) || +per[1] + +per[2] + +per[3] > 105) return json({ error: "bad product" }, 400);
           await sql`INSERT INTO foods (code, name, per, q, src, by_id) VALUES (${code}, ${n}, ${JSON.stringify(per)}::text::jsonb, ${String(b.q || "").slice(0, 40)}, 'user', ${user.id})
             ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name, per = EXCLUDED.per, q = EXCLUDED.q, src = 'user', by_id = EXCLUDED.by_id, updated_at = now() WHERE foods.src <> 'off'`;
+          searchCache.clear();
+          return json({ ok: true });
+        }
+        // a product without a barcode that a user typed in by hand (name + КБЖУ per 100 g): shared with everyone through search.
+        // One entry per name; only its author can change the numbers later.
+        if (path === "/api/food/custom" && req.method === "POST") {
+          const b: any = await req.json().catch(() => ({}));
+          const n = String(b.n || "").replace(/\s+/g, " ").trim().slice(0, 60);
+          const per = Array.isArray(b.per) ? b.per.map(r1) : null;
+          if (n.length < 2 || !okPer(per) || +per[1] + +per[2] + +per[3] > 105) return json({ error: "bad product" }, 400);
+          const code = "u" + createHash("sha1").update(n.toLowerCase().replace(/ё/g, "е")).digest("hex").slice(0, 20);
+          await sql`INSERT INTO foods (code, name, per, q, src, by_id) VALUES (${code}, ${n}, ${JSON.stringify(per)}::text::jsonb, ${""}, 'user', ${user.id})
+            ON CONFLICT (code) DO UPDATE SET per = EXCLUDED.per, name = EXCLUDED.name, updated_at = now() WHERE foods.by_id = EXCLUDED.by_id`;
+          searchCache.clear();
+          console.log("food custom", user.id, n);
           return json({ ok: true });
         }
         if (path === "/api/food/search" && req.method === "GET") {
